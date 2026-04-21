@@ -1,0 +1,20 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+
+# macOS/editor/runtime
+.DS_Store
+.claude/
+.openclaude-profile.json
+
+# Nested project generated output
+dashboard/node_modules/
+dashboard/.next/
+dashboard/dist/
+execution_engine/target/
