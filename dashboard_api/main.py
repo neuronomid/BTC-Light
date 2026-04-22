@@ -30,6 +30,7 @@ from dashboard_api.models import (
 
 # Global state
 DEFAULT_PAPER_BALANCE = 10000.0
+ORCHESTRATOR_LOCK_KEY = "orchestrator:active"
 
 _orchestrator_ref = None
 _orchestrator_task: Optional[asyncio.Task] = None
@@ -130,6 +131,13 @@ app.add_middleware(
 )
 
 # --- Helper functions ---
+
+def _get_active_orchestrator_owner() -> Optional[str]:
+    try:
+        return redis_client.client.get(ORCHESTRATOR_LOCK_KEY)
+    except Exception as e:
+        logger.warning(f"Could not read orchestrator lock: {e}")
+        return None
 
 def _get_orchestrator(
     starting_equity: float = DEFAULT_PAPER_BALANCE,
@@ -366,6 +374,25 @@ async def start_system(req: Optional[SystemStartRequest] = Body(default=None)):
     global _system_running, _system_paused, _orchestrator_task
     paper_balance, starting_equity, _ = await _get_wallet_account_state()
     fetch_external = req.fetch_external if req else False
+    if _orchestrator_task and not _orchestrator_task.done():
+        _system_running = True
+        _system_paused = False
+        return {"message": "System already running"}
+    active_owner = _get_active_orchestrator_owner()
+    if active_owner:
+        await _log_system_event(
+            "WARNING",
+            "DASHBOARD",
+            "Dashboard start blocked because an orchestrator is already active",
+            {"owner": active_owner},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A backend orchestrator is already running outside the dashboard. "
+                "Stop the ./backend process first, or launch only ./backend api and start from the dashboard."
+            ),
+        )
     orch = _get_orchestrator(
         starting_equity=starting_equity,
         current_equity=paper_balance,
@@ -373,10 +400,6 @@ async def start_system(req: Optional[SystemStartRequest] = Body(default=None)):
     )
     if not orch:
         raise HTTPException(status_code=500, detail="Orchestrator not available")
-    if _orchestrator_task and not _orchestrator_task.done():
-        _system_running = True
-        _system_paused = False
-        return {"message": "System already running"}
     _system_running = True
     _system_paused = False
     _orchestrator_task = asyncio.create_task(orch.run(cycle_interval_seconds=60))

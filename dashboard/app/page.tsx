@@ -81,6 +81,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState<StatisticalSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ tone: "info" | "error"; text: string } | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [fetchExternal, setFetchExternal] = useState(false);
 
@@ -141,29 +142,48 @@ export default function Dashboard() {
     }
   }, [lastMessage, refresh]);
 
+  useEffect(() => {
+    if (!actionMessage || actionMessage.tone !== "info") return;
+
+    const clearMessageTimeout = window.setTimeout(() => {
+      setActionMessage(null);
+    }, 2000);
+
+    return () => window.clearTimeout(clearMessageTimeout);
+  }, [actionMessage]);
+
   const handleAction = async (action: string) => {
     setActionLoading(action);
+    setActionMessage(null);
     try {
+      let result: { message: string } | undefined;
       switch (action) {
         case "start":
-          await api.start({ fetch_external: fetchExternal });
+          result = await api.start({ fetch_external: fetchExternal });
           break;
         case "pause":
-          await api.pause();
+          result = await api.pause();
           break;
         case "resume":
-          await api.resume();
+          result = await api.resume();
           break;
         case "shutdown":
-          await api.shutdown();
+          result = await api.shutdown();
           break;
         case "reset":
-          await api.reset();
+          result = await api.reset();
           break;
+      }
+      if (result?.message) {
+        setActionMessage({ tone: "info", text: result.message });
       }
       await refresh();
     } catch (e) {
       console.error(e);
+      setActionMessage({
+        tone: "error",
+        text: e instanceof Error ? e.message : "Action failed",
+      });
     } finally {
       setActionLoading(null);
     }
@@ -318,6 +338,18 @@ export default function Dashboard() {
         {/* Content */}
         <ScrollArea className="flex-1">
           <div className="p-6 max-w-7xl mx-auto">
+            {actionMessage && (
+              <div
+                role={actionMessage.tone === "error" ? "alert" : "status"}
+                className={`mb-4 rounded-md border px-3 py-2 text-sm ${
+                  actionMessage.tone === "error"
+                    ? "border-red-500/30 bg-red-500/10 text-red-200"
+                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                }`}
+              >
+                {actionMessage.text}
+              </div>
+            )}
             {loading ? (
               <div className="flex items-center justify-center h-64 text-zinc-500">
                 <Activity className="w-5 h-5 animate-spin mr-2" />
