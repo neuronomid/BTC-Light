@@ -12,6 +12,7 @@ export interface SystemStatus {
   current_price: number | null;
   last_cycle: string | null;
   mode: string;
+  fetch_external: boolean;
 }
 
 export interface Position {
@@ -110,7 +111,12 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => fetchJson<SystemStatus>("/api/status"),
-  start: () => fetchJson<{ message: string }>("/api/system/start", { method: "POST" }),
+  start: (options?: { fetch_external?: boolean }) =>
+    fetchJson<{ message: string }>("/api/system/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options || {}),
+    }),
   pause: () => fetchJson<{ message: string }>("/api/system/pause", { method: "POST" }),
   resume: () => fetchJson<{ message: string }>("/api/system/resume", { method: "POST" }),
   shutdown: () => fetchJson<{ message: string }>("/api/system/shutdown", { method: "POST" }),

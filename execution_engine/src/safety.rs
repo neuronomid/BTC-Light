@@ -89,7 +89,10 @@ impl SafetyEngine {
         SafetyCheck::pass("All safety checks passed.")
     }
 
-    /// Calculate position size using fractional Kelly and hard caps.
+    /// Calculate position size in BTC units from a USD risk budget and
+    /// stop-loss distance. Applies both a per-trade risk cap and a notional
+    /// leverage cap. Returns 0.0 when futures sizing cannot be determined
+    /// (no entry/stop prices, zero stop distance, or non-positive equity).
     pub fn calculate_size(
         &self,
         decision: &TradeDecision,
@@ -98,30 +101,38 @@ impl SafetyEngine {
         entry_price: f64,
         stop_loss_price: f64,
     ) -> f64 {
+        if equity <= 0.0
+            || entry_price <= 0.0
+            || stop_loss_price <= 0.0
+            || (entry_price - stop_loss_price).abs() <= 0.0
+        {
+            return 0.0;
+        }
         let kelly_frac = stats
             .get("probability")
             .and_then(|p| p.get("kelly_fraction"))
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let base = equity * (kelly_frac * 0.25).min(MAX_RISK_PER_TRADE) * decision.size_multiplier;
-
+            .unwrap_or(0.0)
+            .max(0.0);
         let regime_stability = stats
             .get("change_point")
             .and_then(|cp| cp.get("regime_stability_score"))
             .and_then(|v| v.as_f64())
-            .unwrap_or(1.0);
-
-        let mut size = base * regime_stability;
-
-        if entry_price > 0.0 && stop_loss_price > 0.0 {
-            let sl_dist = (entry_price - stop_loss_price).abs();
-            if sl_dist > 0.0 {
-                size = size / sl_dist; // notional ~ risk / sl distance
-            }
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        let multiplier = decision.size_multiplier.clamp(0.0, 1.0);
+        let risk_fraction =
+            (kelly_frac * 0.25).min(MAX_RISK_PER_TRADE) * regime_stability * multiplier;
+        if risk_fraction <= 0.0 {
+            return 0.0;
         }
-        let cap = equity * MAX_RISK_PER_TRADE;
-        size = size.min(cap);
-        (size * 1e6).round() / 1e6
+        let risk_budget_usd = equity * risk_fraction;
+        let sl_dist = (entry_price - stop_loss_price).abs();
+        let size_units = risk_budget_usd / sl_dist;
+        let max_notional = equity * MAX_LEVERAGE.max(0.0);
+        let max_size_units = max_notional / entry_price;
+        let size = size_units.min(max_size_units).max(0.0);
+        (size * 1e8).round() / 1e8
     }
 }
 
@@ -241,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn calculate_size_uses_fractional_kelly_multiplier_and_stability_without_prices() {
+    fn calculate_size_returns_zero_without_valid_prices() {
         let stats = json!({
             "probability": {"kelly_fraction": 0.04},
             "change_point": {"regime_stability_score": 0.5}
@@ -251,7 +262,26 @@ mod tests {
 
         let size = SafetyEngine::new().calculate_size(&dec, &stats, 10_000.0, 0.0, 0.0);
 
-        assert!((size - 25.0).abs() < 1e-9);
+        assert_eq!(size, 0.0);
+    }
+
+    #[test]
+    fn calculate_size_enforces_leverage_cap_for_small_stop_distance() {
+        // Tiny stop distance would otherwise produce an unbounded unit count;
+        // the max_leverage cap clamps notional to equity * max_leverage.
+        let stats = json!({
+            "probability": {"kelly_fraction": 1.0},
+            "change_point": {"regime_stability_score": 1.0}
+        });
+        let size = SafetyEngine::new().calculate_size(
+            &decision(Action::LONG, 80),
+            &stats,
+            10_000.0,
+            100_000.0,
+            99_999.99,
+        );
+        // max_notional = 10_000 * 5 = 50_000 -> max units = 50_000 / 100_000 = 0.5
+        assert!((size - 0.5).abs() < 1e-6);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, BigInteger, JSON, Index, Text
-from datetime import datetime
 from shared.db import Base
+from shared.time_utils import utc_now_naive
 
 class PaperWalletTransaction(Base):
     __tablename__ = "paper_wallet_transactions"
@@ -9,7 +9,7 @@ class PaperWalletTransaction(Base):
     amount = Column(Float, nullable=False)
     balance_after = Column(Float, nullable=False)
     description = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 class SystemLog(Base):
     __tablename__ = "system_logs"
@@ -18,7 +18,7 @@ class SystemLog(Base):
     source = Column(String(50), nullable=False)  # ORCHESTRATOR, AGENT, EXECUTION, SAFETY, DASHBOARD
     message = Column(Text, nullable=False)
     meta_data = Column(JSON)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
     __table_args__ = (
         Index("ix_system_logs_created_at", "created_at"),
         Index("ix_system_logs_level", "level"),
@@ -31,7 +31,7 @@ class AgentOutputLog(Base):
     agent_name = Column(String(50), nullable=False)  # market_context, news_sentiment, trade_decision, risk_monitor
     cycle_timestamp = Column(DateTime, nullable=False)
     output_data = Column(JSON, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
     __table_args__ = (
         Index("ix_agent_output_logs_agent_name", "agent_name"),
         Index("ix_agent_output_logs_cycle_timestamp", "cycle_timestamp"),

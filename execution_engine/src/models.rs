@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Action {
     LONG,
@@ -15,6 +16,7 @@ pub enum PositionStatus {
     CLOSED,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExitReason {
     STOP_LOSS,
@@ -241,6 +243,7 @@ pub struct AccountStatus {
     pub current_price: Option<f64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskUpdate {
     pub daily_pnl: f64,

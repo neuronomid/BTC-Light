@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+REDIS_HOST="${REDIS_HOST:-localhost}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-5432}"
+DB_USER="${DB_USER:-postgres}"
+DB_PASSWORD="${DB_PASSWORD:-postgres}"
+DB_NAME="${DB_NAME:-btc_trader}"
+INTERVAL="${INTERVAL:-60}"
+
+if [[ -x "$ROOT_DIR/venv/bin/python" ]]; then
+  PYTHON_BIN="${PYTHON:-$ROOT_DIR/venv/bin/python}"
+else
+  PYTHON_BIN="${PYTHON:-python3}"
+fi
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./backend [command] [args...]
+
+Commands:
+  orchestrator   Start Redis/Postgres if possible, then run the continuous paper backend. Default.
+  api            Start Redis/Postgres if possible, then run the FastAPI dashboard backend.
+  once           Start Redis/Postgres if possible, then run one full backend cycle.
+  stats          Start Redis/Postgres if possible, then run one statistical cycle.
+  ingest         Start Redis/Postgres if possible, then fetch and store market data once.
+
+Examples:
+  ./backend
+  ./backend --interval 30
+  ./backend api
+  ./backend once --fetch-external
+  INTERVAL=120 ./backend
+  NO_AUTO_SERVICES=1 ./backend
+
+Notes:
+  This script does not place live exchange orders. The default backend is the paper
+  orchestrator from orchestrator.py.
+EOF
+}
+
+log() {
+  printf '[backend] %s\n' "$*"
+}
+
+have_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+redis_ready() {
+  if have_command redis-cli; then
+    redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping >/dev/null 2>&1
+  else
+    "$PYTHON_BIN" - "$REDIS_HOST" "$REDIS_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2])
+with socket.create_connection((host, port), timeout=1):
+    pass
+PY
+  fi
+}
+
+postgres_ready() {
+  if have_command pg_isready; then
+    pg_isready -h "$DB_HOST" -p "$DB_PORT" >/dev/null 2>&1
+  else
+    "$PYTHON_BIN" - "$DB_HOST" "$DB_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2])
+with socket.create_connection((host, port), timeout=1):
+    pass
+PY
+  fi
+}
+
+wait_for() {
+  local label="$1"
+  local check_fn="$2"
+  local timeout_seconds="${3:-30}"
+
+  for ((i = 1; i <= timeout_seconds; i++)); do
+    if "$check_fn"; then
+      log "$label is ready."
+      return 0
+    fi
+    sleep 1
+  done
+
+  log "$label did not become ready within ${timeout_seconds}s."
+  return 1
+}
+
+try_start_redis() {
+  if redis_ready; then
+    log "Redis is already running."
+    return 0
+  fi
+
+  if [[ "${NO_AUTO_SERVICES:-0}" == "1" ]]; then
+    log "Redis is not running. Start it manually or unset NO_AUTO_SERVICES."
+    return 1
+  fi
+
+  if have_command brew && brew list --formula redis >/dev/null 2>&1; then
+    log "Starting Redis with Homebrew..."
+    brew services start redis >/dev/null
+    wait_for "Redis" redis_ready 30
+    return $?
+  fi
+
+  log "Redis is not running, and I could not start it automatically."
+  log "Install/start it with: brew install redis && brew services start redis"
+  return 1
+}
+
+postgres_formula() {
+  local formula
+
+  if ! have_command brew; then
+    return 1
+  fi
+
+  if brew list --formula postgresql >/dev/null 2>&1; then
+    printf 'postgresql\n'
+    return 0
+  fi
+
+  for formula in postgresql@18 postgresql@17 postgresql@16 postgresql@15 postgresql@14 postgresql@13; do
+    if brew list --formula "$formula" >/dev/null 2>&1; then
+      printf '%s\n' "$formula"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+postgres_data_dir() {
+  local formula="$1"
+
+  if brew --prefix "$formula" >/dev/null 2>&1; then
+    printf '%s/var/%s\n' "$(brew --prefix)" "$formula"
+    return 0
+  fi
+
+  return 1
+}
+
+postgres_pid_is_live_server() {
+  local pid_file="$1"
+  local pid
+  local command_line
+
+  [[ -f "$pid_file" ]] || return 1
+
+  pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command_line" == *postgres* ]]
+}
+
+clear_stale_postgres_pid() {
+  local data_dir="$1"
+  local pid_file="${data_dir}/postmaster.pid"
+  local stale_file
+
+  [[ -f "$pid_file" ]] || return 0
+
+  if postgres_pid_is_live_server "$pid_file"; then
+    return 0
+  fi
+
+  stale_file="${pid_file}.stale.$(date +%Y%m%d%H%M%S)"
+  log "Moving stale PostgreSQL lock file to ${stale_file}."
+  mv "$pid_file" "$stale_file"
+}
+
+start_postgres_directly() {
+  local formula="$1"
+  local data_dir
+  local pg_ctl_bin
+  local log_file
+
+  data_dir="$(postgres_data_dir "$formula")"
+  pg_ctl_bin="$(brew --prefix "$formula")/bin/pg_ctl"
+  log_file="$(brew --prefix)/var/log/${formula}.log"
+
+  if [[ ! -x "$pg_ctl_bin" || ! -d "$data_dir" ]]; then
+    return 1
+  fi
+
+  clear_stale_postgres_pid "$data_dir"
+
+  log "Starting PostgreSQL directly with pg_ctl..."
+  "$pg_ctl_bin" -D "$data_dir" -l "$log_file" start >/dev/null
+  wait_for "PostgreSQL" postgres_ready 45
+}
+
+try_start_postgres() {
+  local formula
+  local data_dir
+
+  if postgres_ready; then
+    log "PostgreSQL is already running."
+    return 0
+  fi
+
+  if [[ "${NO_AUTO_SERVICES:-0}" == "1" ]]; then
+    log "PostgreSQL is not running. Start it manually or unset NO_AUTO_SERVICES."
+    return 1
+  fi
+
+  if formula="$(postgres_formula)"; then
+    if data_dir="$(postgres_data_dir "$formula")"; then
+      clear_stale_postgres_pid "$data_dir"
+    fi
+
+    log "Starting PostgreSQL with Homebrew formula ${formula}..."
+    if brew services start "$formula" >/dev/null 2>&1 && wait_for "PostgreSQL" postgres_ready 45; then
+      return 0
+    fi
+
+    log "Homebrew services did not start PostgreSQL cleanly; trying direct pg_ctl fallback."
+    brew services stop "$formula" >/dev/null 2>&1 || true
+    start_postgres_directly "$formula"
+    return $?
+  fi
+
+  log "PostgreSQL is not running, and I could not start it automatically."
+  log "Install/start it with: brew install postgresql@16 && brew services start postgresql@16"
+  return 1
+}
+
+database_ready() {
+  DB_PASSWORD="$DB_PASSWORD" "$PYTHON_BIN" - "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_NAME" <<'PY' >/dev/null 2>&1
+import os
+import sys
+
+import psycopg2
+
+host, port, user, database = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+conn = psycopg2.connect(
+    host=host,
+    port=port,
+    user=user,
+    password=os.environ.get("DB_PASSWORD", ""),
+    dbname=database,
+    connect_timeout=3,
+)
+conn.close()
+PY
+}
+
+create_database() {
+  DB_PASSWORD="$DB_PASSWORD" "$PYTHON_BIN" - "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_NAME" <<'PY' >/dev/null 2>&1
+import os
+import sys
+
+import psycopg2
+from psycopg2 import sql
+
+host, port, user, database = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+password = os.environ.get("DB_PASSWORD", "")
+admin_user = os.environ.get("USER", "")
+
+def connect(dbname):
+    candidates = [(user, password)]
+    if admin_user and admin_user != user:
+        candidates.append((admin_user, ""))
+    if user != "postgres":
+        candidates.append(("postgres", ""))
+
+    last_error = None
+    for candidate_user, candidate_password in candidates:
+        try:
+            return psycopg2.connect(
+                host=host,
+                port=port,
+                user=candidate_user,
+                password=candidate_password,
+                dbname=dbname,
+                connect_timeout=3,
+            )
+        except Exception as exc:
+            last_error = exc
+    raise last_error
+
+def connect_admin(dbname):
+    candidates = []
+    if admin_user:
+        candidates.append((admin_user, ""))
+    if user != admin_user:
+        candidates.append((user, password))
+    if user != "postgres":
+        candidates.append(("postgres", ""))
+
+    last_error = None
+    for candidate_user, candidate_password in candidates:
+        try:
+            return psycopg2.connect(
+                host=host,
+                port=port,
+                user=candidate_user,
+                password=candidate_password,
+                dbname=dbname,
+                connect_timeout=3,
+            )
+        except Exception as exc:
+            last_error = exc
+    raise last_error
+
+maintenance_conn = None
+last_error = None
+for maintenance_db in ("postgres", "template1"):
+    try:
+        maintenance_conn = connect(maintenance_db)
+        break
+    except Exception as exc:
+        last_error = exc
+if maintenance_conn is None:
+    raise last_error
+
+maintenance_conn.autocommit = True
+try:
+    with maintenance_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (user,))
+        if cur.fetchone() is None:
+            if password:
+                cur.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN PASSWORD %s").format(sql.Identifier(user)),
+                    (password,),
+                )
+            else:
+                cur.execute(sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(user)))
+
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,))
+        if cur.fetchone() is None:
+            cur.execute(
+                sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    sql.Identifier(database),
+                    sql.Identifier(user),
+                )
+            )
+        else:
+            cur.execute(
+                sql.SQL("GRANT ALL PRIVILEGES ON DATABASE {} TO {}").format(
+                    sql.Identifier(database),
+                    sql.Identifier(user),
+                )
+            )
+finally:
+    maintenance_conn.close()
+
+target_conn = connect_admin(database)
+target_conn.autocommit = True
+try:
+    with target_conn.cursor() as cur:
+        cur.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(sql.Identifier(user)))
+        cur.execute(sql.SQL("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {}").format(sql.Identifier(user)))
+        cur.execute(sql.SQL("GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {}").format(sql.Identifier(user)))
+finally:
+    target_conn.close()
+PY
+}
+
+ensure_database() {
+  if database_ready; then
+    log "PostgreSQL database '${DB_NAME}' is reachable."
+    return 0
+  fi
+
+  log "Creating PostgreSQL database '${DB_NAME}' if possible..."
+  if create_database && database_ready; then
+    log "PostgreSQL database '${DB_NAME}' is reachable."
+    return 0
+  fi
+
+  log "PostgreSQL is running, but database '${DB_NAME}' is not reachable."
+  log "Create it manually with: createdb -h ${DB_HOST} -p ${DB_PORT} -U ${DB_USER} ${DB_NAME}"
+  log "If your .env uses different DB_* values, export those values before running ./backend."
+  return 1
+}
+
+ensure_python_ready() {
+  if [[ ! -x "$PYTHON_BIN" ]] && ! have_command "$PYTHON_BIN"; then
+    log "Python not found. Create the project venv first:"
+    log "python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+    return 1
+  fi
+
+  if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import psycopg2
+import redis
+import sqlalchemy
+PY
+  then
+    log "Python dependencies are missing from the selected environment."
+    log "Install them with: ${PYTHON_BIN} -m pip install -r requirements.txt"
+    return 1
+  fi
+}
+
+ensure_api_ready() {
+  if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import fastapi
+import uvicorn
+PY
+  then
+    log "FastAPI dashboard backend dependencies are missing from the selected environment."
+    log "Install them with: ${PYTHON_BIN} -m pip install -r requirements.txt"
+    return 1
+  fi
+}
+
+ensure_backend_services() {
+  ensure_python_ready
+  if [[ "$mode" == "api" ]]; then
+    ensure_api_ready
+  fi
+  try_start_redis
+  try_start_postgres
+  ensure_database
+}
+
+mode="orchestrator"
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    orchestrator|api|once|stats|ingest)
+      mode="$1"
+      shift
+      ;;
+  esac
+fi
+
+ensure_backend_services
+
+case "$mode" in
+  orchestrator)
+    log "Starting continuous paper backend. Press Ctrl+C to stop."
+    exec "$PYTHON_BIN" orchestrator.py --interval "$INTERVAL" "$@"
+    ;;
+  api)
+    log "Starting FastAPI dashboard backend on http://localhost:8000. Press Ctrl+C to stop."
+    exec "$PYTHON_BIN" -m uvicorn dashboard_api.main:app --host 0.0.0.0 --port 8000 "$@"
+    ;;
+  once)
+    log "Running one full backend cycle."
+    exec "$PYTHON_BIN" run.py --mode full "$@"
+    ;;
+  stats)
+    log "Running one statistical backend cycle."
+    exec "$PYTHON_BIN" run.py --mode stats "$@"
+    ;;
+  ingest)
+    log "Fetching and storing market data once."
+    exec "$PYTHON_BIN" run.py --mode ingest "$@"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

@@ -11,5 +11,6 @@ pub const MIN_EV_TO_TRADE: f64 = 0.005;
 
 /// Redis keys used for shared state.
 pub const REDIS_KEY_TRADING_STATUS: &str = "trading_status";
+#[allow(dead_code)]
 pub const REDIS_CHANNEL_POSITION_OPENED: &str = "position:opened";
 pub const REDIS_CHANNEL_POSITION_CLOSED: &str = "position:closed";

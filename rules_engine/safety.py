@@ -4,7 +4,8 @@ from config.settings import (
     MAX_RISK_PER_TRADE, MAX_DAILY_LOSS, MAX_WEEKLY_LOSS,
     MAX_OPEN_POSITIONS, MAX_POSITION_DURATION_HOURS,
     MIN_TIME_BETWEEN_TRADES_HOURS, MAX_LEVERAGE,
-    MIN_CONVICTION_TO_TRADE, MIN_EV_TO_TRADE
+    MIN_CONVICTION_TO_TRADE, MIN_EV_TO_TRADE,
+    KELLY_FRACTION,
 )
 from loguru import logger
 
@@ -50,14 +51,26 @@ class SafetyEngine:
         stats: Dict,
         equity: float = 10000.0,
         entry_price: float = 0.0,
-        stop_loss_price: float = 0.0
+        stop_loss_price: float = 0.0,
+        max_risk_per_trade: float = MAX_RISK_PER_TRADE,
+        max_leverage: float = MAX_LEVERAGE,
     ) -> float:
-        kelly = stats.get("probability", {}).get("kelly_fraction", 0)
-        size = equity * min(kelly * 0.25, MAX_RISK_PER_TRADE) * decision.get("size_multiplier", 1.0)
-        regime_stability = stats.get("change_point", {}).get("regime_stability_score", 1.0)
-        size *= regime_stability
-        if entry_price > 0 and stop_loss_price > 0:
-            sl_dist = abs(entry_price - stop_loss_price)
-            size = size * equity / sl_dist * MAX_LEVERAGE
-        size = min(size, equity * MAX_RISK_PER_TRADE)
-        return round(size, 6)
+        # Futures sizing requires a known entry and stop loss to translate a
+        # USD risk budget into BTC units. Without them, sizing is undefined.
+        if equity <= 0 or entry_price <= 0 or stop_loss_price <= 0 or entry_price == stop_loss_price:
+            return 0.0
+        kelly = max(stats.get("probability", {}).get("kelly_fraction", 0) or 0.0, 0.0)
+        stability = stats.get("change_point", {}).get("regime_stability_score", 1.0) or 1.0
+        stability = max(0.0, min(stability, 1.0))
+        multiplier = max(0.0, min(decision.get("size_multiplier", 1.0) or 1.0, 1.0))
+        risk_fraction = min(kelly * KELLY_FRACTION, max_risk_per_trade) * stability * multiplier
+        if risk_fraction <= 0:
+            return 0.0
+        risk_budget_usd = equity * risk_fraction
+        sl_dist_usd = abs(entry_price - stop_loss_price)
+        size_units = risk_budget_usd / sl_dist_usd
+        # Hard notional cap: position notional must not exceed equity * max_leverage.
+        max_notional_usd = equity * max(max_leverage, 0.0)
+        max_size_units = max_notional_usd / entry_price
+        size_units = min(size_units, max_size_units)
+        return round(max(size_units, 0.0), 8)

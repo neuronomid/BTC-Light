@@ -1,9 +1,9 @@
 import asyncio
 import pandas as pd
-from datetime import datetime
 from typing import Dict, Optional
 from shared.redis_client import redis_client
 from shared.db import AsyncSessionLocal, StatisticalSnapshot
+from shared.time_utils import utc_now, utc_now_naive
 from data.ingest_yahoo import YahooFinanceIngestor
 from data.external_feeds import ExternalFeedManager
 from statistical_engine.regime import RegimeClassifier
@@ -55,7 +55,7 @@ class StatisticalEngine:
         snapshot = {
             "symbol": SYMBOL,
             "timeframe": TIMEFRAME,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "latest_close": float(df["close"].iloc[-1]) if not df.empty else None,
             "regime": regime_data,
             "trend": trend_data,
@@ -81,7 +81,7 @@ class StatisticalEngine:
         async with AsyncSessionLocal() as session:
             rec = StatisticalSnapshot(
                 symbol=snapshot["symbol"],
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now_naive(),
                 regime_data=snapshot.get("regime"),
                 trend_data=snapshot.get("trend"),
                 volatility_data=snapshot.get("volatility"),

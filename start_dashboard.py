@@ -33,7 +33,7 @@ def start_frontend():
     """Serve the built Next.js frontend."""
     print("[2/2] Starting Next.js frontend on http://localhost:3000 ...")
     proc = subprocess.Popen(
-        ["npx", "serve@latest", "dist", "-l", "3000"],
+        ["npx", "serve@latest", "out", "-l", "3000"],
         cwd=os.path.join(BASE_DIR, "dashboard"),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

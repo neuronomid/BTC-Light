@@ -41,6 +41,7 @@ impl RedisBridge {
     }
 
     /// Get and deserialize JSON from a key.
+    #[allow(dead_code)]
     pub async fn get_json(&mut self, key: &str) -> Result<Option<Value>> {
         let val: Option<String> = self.conn.get(key).await?;
         match val {
@@ -50,6 +51,7 @@ impl RedisBridge {
     }
 
     /// Publish position opened event.
+    #[allow(dead_code)]
     pub async fn publish_position_opened(&mut self, pos: &Position) -> Result<()> {
         let payload = serde_json::json!({
             "trade_id": pos.trade_id,

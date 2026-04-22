@@ -82,6 +82,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
+  const [fetchExternal, setFetchExternal] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -145,7 +146,7 @@ export default function Dashboard() {
     try {
       switch (action) {
         case "start":
-          await api.start();
+          await api.start({ fetch_external: fetchExternal });
           break;
         case "pause":
           await api.pause();
@@ -177,6 +178,9 @@ export default function Dashboard() {
     time: parseApiDate(d.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     date: parseApiDate(d.timestamp).toLocaleDateString([], { month: "short", day: "numeric" }),
   }));
+  const displayedFetchExternal = status?.running || status?.paused
+    ? status.fetch_external
+    : fetchExternal;
 
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-100">
@@ -239,6 +243,20 @@ export default function Dashboard() {
             )}
           </div>
           <div className="flex items-center gap-2">
+            <label className={`flex h-7 items-center gap-2 rounded-md border border-zinc-800 px-2 text-xs ${
+              status?.running || status?.paused
+                ? "text-zinc-500"
+                : "text-zinc-300 hover:bg-zinc-800/50"
+            }`}>
+              <input
+                type="checkbox"
+                checked={displayedFetchExternal}
+                onChange={(event) => setFetchExternal(event.target.checked)}
+                disabled={status?.running || status?.paused || !!actionLoading}
+                className="h-3.5 w-3.5 accent-emerald-500"
+              />
+              External feeds
+            </label>
             {!status?.running && !status?.paused && (
               <Button
                 size="sm"

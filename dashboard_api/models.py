@@ -2,6 +2,9 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 
+class SystemStartRequest(BaseModel):
+    fetch_external: bool = False
+
 class SystemStatus(BaseModel):
     running: bool
     paused: bool
@@ -14,6 +17,7 @@ class SystemStatus(BaseModel):
     current_price: Optional[float]
     last_cycle: Optional[str]
     mode: str = "PAPER"
+    fetch_external: bool = False
 
 class PositionResponse(BaseModel):
     trade_id: str

@@ -1,9 +1,10 @@
 import unittest
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import patch
 
 from rules_engine.execution import PaperExecutionEngine, Position
 from rules_engine.safety import SafetyEngine
+from shared.time_utils import utc_now
 
 
 class FakeRedis:
@@ -106,7 +107,7 @@ class TestSafetyEngine(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.reason, "All safety checks passed.")
 
-    def test_calculate_size_uses_fractional_kelly_and_regime_stability_without_prices(self):
+    def test_calculate_size_returns_zero_without_valid_prices(self):
         snapshot = passing_snapshot()
         snapshot["probability"]["kelly_fraction"] = 0.04
         snapshot["change_point"]["regime_stability_score"] = 0.5
@@ -117,9 +118,9 @@ class TestSafetyEngine(unittest.TestCase):
             equity=10_000,
         )
 
-        self.assertEqual(size, 25.0)
+        self.assertEqual(size, 0.0)
 
-    def test_calculate_size_caps_position_when_stop_distance_formula_exceeds_risk_limit(self):
+    def test_calculate_size_converts_risk_budget_to_btc_units_with_stop_distance(self):
         size = SafetyEngine().calculate_size(
             long_decision(),
             passing_snapshot(),
@@ -128,7 +129,38 @@ class TestSafetyEngine(unittest.TestCase):
             stop_loss_price=98.0,
         )
 
-        self.assertEqual(size, 200.0)
+        # risk_budget = 10_000 * min(0.4 * 0.25, 0.02) = 200
+        # size_units = 200 / (100 - 98) = 100
+        self.assertEqual(size, 100.0)
+
+    def test_calculate_size_enforces_leverage_cap_at_real_btc_prices(self):
+        # Tiny stop distance relative to price; leverage cap binds instead.
+        size = SafetyEngine().calculate_size(
+            long_decision(),
+            passing_snapshot(),
+            equity=5_000,
+            entry_price=100_000.0,
+            stop_loss_price=99_999.0,
+        )
+
+        # max_notional = 5_000 * 5 = 25_000 -> max_size = 25_000 / 100_000 = 0.25
+        self.assertAlmostEqual(size, 0.25, places=6)
+
+    def test_calculate_size_produces_bounded_units_at_real_btc_prices(self):
+        # On a $5K account, a 2% stop at $98,545 must not size anywhere near 100 BTC.
+        size = SafetyEngine().calculate_size(
+            long_decision(),
+            passing_snapshot(),
+            equity=5_000,
+            entry_price=98_545.60,
+            stop_loss_price=98_545.60 * (1 - 0.02),
+        )
+
+        # risk_budget = 5_000 * 0.02 = 100; sl_dist = 1970.912; size ~= 0.0507 BTC
+        notional = size * 98_545.60
+        self.assertLess(size, 0.1)
+        self.assertLess(notional, 5_000 * 5 + 1e-6)
+        self.assertAlmostEqual(size * 1970.912, 100.0, places=2)
 
 
 class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
@@ -141,8 +173,8 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
     def test_update_price_marks_long_and_short_pnl(self):
         engine = PaperExecutionEngine()
         engine.positions = [
-            Position("L1", "BTC-USD", "LONG", 100.0, 2.0, 95.0, 110.0, datetime.utcnow(), 80, "long"),
-            Position("S1", "BTC-USD", "SHORT", 100.0, 3.0, 105.0, 90.0, datetime.utcnow(), 80, "short"),
+            Position("L1", "BTC-USD", "LONG", 100.0, 2.0, 95.0, 110.0, utc_now(), 80, "long"),
+            Position("S1", "BTC-USD", "SHORT", 100.0, 3.0, 105.0, 90.0, utc_now(), 80, "short"),
         ]
 
         engine.update_price(110.0)
@@ -171,7 +203,7 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos.entry_price, 100.0)
         self.assertEqual(pos.stop_loss, 98.0)
         self.assertEqual(pos.take_profit, 104.0)
-        self.assertEqual(pos.size, 200.0)
+        self.assertEqual(pos.size, 100.0)
         self.assertEqual(engine.safety.open_positions, 1)
         self.assertEqual(self.redis.published[0][0], "position:opened")
 
@@ -202,9 +234,9 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(pos.status, "CLOSED")
         self.assertEqual(len(engine.closed_trades), 1)
-        self.assertEqual(engine.equity, 10_800.0)
-        self.assertEqual(engine.daily_pnl, 800.0)
-        self.assertEqual(callback_events, [(pos.trade_id, "TAKE_PROFIT", 800.0)])
+        self.assertEqual(engine.equity, 10_400.0)
+        self.assertEqual(engine.daily_pnl, 400.0)
+        self.assertEqual(callback_events, [(pos.trade_id, "TAKE_PROFIT", 400.0)])
         self.assertEqual(self.redis.published[-1][0], "position:closed")
         self.assertEqual(self.redis.published[-1][1]["reason"], "TAKE_PROFIT")
 
@@ -219,7 +251,7 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
         await engine.tick()
 
         self.assertEqual(pos.status, "CLOSED")
-        self.assertEqual(engine.closed_trades[0].pnl, -400.0)
+        self.assertEqual(engine.closed_trades[0].pnl, -200.0)
         self.assertEqual(self.redis.published[-1][1]["reason"], "STOP_LOSS")
 
     async def test_tick_closes_positions_that_exceed_max_duration(self):
@@ -232,7 +264,7 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
             1.0,
             50.0,
             200.0,
-            datetime.utcnow() - timedelta(hours=30),
+            utc_now() - timedelta(hours=30),
             80,
             "old",
         )
@@ -255,7 +287,7 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
             1.0,
             1.0,
             1_000.0,
-            datetime.utcnow(),
+            utc_now(),
             80,
             "circuit breaker",
         )
@@ -272,8 +304,8 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
     def test_get_status_counts_only_open_positions(self):
         engine = PaperExecutionEngine(initial_equity=10_000)
         engine.positions = [
-            Position("OPEN", "BTC-USD", "LONG", 100, 1, 90, 110, datetime.utcnow(), 80, ""),
-            Position("CLOSED", "BTC-USD", "LONG", 100, 1, 90, 110, datetime.utcnow(), 80, "", status="CLOSED"),
+            Position("OPEN", "BTC-USD", "LONG", 100, 1, 90, 110, utc_now(), 80, ""),
+            Position("CLOSED", "BTC-USD", "LONG", 100, 1, 90, 110, utc_now(), 80, "", status="CLOSED"),
         ]
         engine.closed_trades = [engine.positions[1]]
         engine.update_price(101.234)

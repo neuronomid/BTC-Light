@@ -66,6 +66,20 @@ All components communicate through Redis, so the execution layer never waits for
 
 ## Running the System
 
+### One-command backend
+```bash
+./backend
+```
+
+This starts Redis and PostgreSQL with Homebrew when they are installed but not
+running, falls back to `pg_ctl` when macOS launch services fail, bootstraps the
+configured PostgreSQL role/database when possible, then launches the continuous
+paper-trading backend. Use `./backend api` for the FastAPI dashboard backend,
+or `./backend --help` for the other modes.
+
+The launcher uses exported `REDIS_*` and `DB_*` values for setup checks, falling
+back to the same defaults shown in `.env.example`.
+
 ### One-shot analysis (no trading)
 ```bash
 python run.py --mode stats

@@ -2,12 +2,15 @@ import asyncio
 import json
 import os
 import sys
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+import redis as redis_lib
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,19 +18,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from shared.db import AsyncSessionLocal, Candle, engine, init_db
 from shared.redis_client import redis_client
-from config.settings import TIMEFRAME
+from shared.time_utils import utc_now, utc_now_naive
+from config.settings import TIMEFRAME, REDIS_HOST, REDIS_PORT, REDIS_DB
 from dashboard_api.db_models import PaperWalletTransaction, SystemLog, AgentOutputLog, PriceTick
 from dashboard_api.models import (
     SystemStatus, PositionResponse, TradeHistoryResponse,
     PaperWalletTransactionRequest, PaperWalletTransactionResponse,
     PaperWalletBalance, AgentOutputResponse, SystemLogResponse,
-    ChartDataPoint, StatisticalSnapshotResponse
+    ChartDataPoint, StatisticalSnapshotResponse, SystemStartRequest
 )
 
 # Global state
 DEFAULT_PAPER_BALANCE = 10000.0
 
 _orchestrator_ref = None
+_orchestrator_task: Optional[asyncio.Task] = None
 _system_paused = False
 _system_running = False
 
@@ -57,28 +62,40 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # Redis pub/sub bridge
+REDIS_CHANNELS = ("position:opened", "position:closed", "trade_decision", "statistical:snapshot", "candles:new")
 _redis_queue: asyncio.Queue = asyncio.Queue()
 
 def _redis_listen_sync(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
-    try:
-        pubsub = redis_client.client.pubsub()
-        pubsub.subscribe("position:opened", "position:closed", "trade_decision", "statistical:snapshot", "candles:new")
-        for message in pubsub.listen():
-            if message["type"] == "message":
+    while True:
+        try:
+            client = redis_lib.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                decode_responses=True,
+            )
+            client.ping()
+            pubsub = client.pubsub()
+            pubsub.subscribe(*REDIS_CHANNELS)
+            logger.info(f"Dashboard Redis listener subscribed to {', '.join(REDIS_CHANNELS)}")
+            for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
                 try:
-                    data = json.loads(message["data"])
-                    asyncio.run_coroutine_threadsafe(
-                        queue.put({
+                    data = json.loads(message.get("data", "{}"))
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {
                             "type": message["channel"],
                             "data": data,
-                            "timestamp": datetime.utcnow().isoformat()
-                        }),
-                        loop
+                            "timestamp": utc_now().isoformat()
+                        }
                     )
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    logger.warning(f"Dashboard Redis listener dropped malformed message: {e}")
+        except Exception as e:
+            logger.error(f"Dashboard Redis listener error: {e}")
+            time.sleep(2)
 
 async def redis_listener():
     loop = asyncio.get_event_loop()
@@ -117,20 +134,27 @@ app.add_middleware(
 def _get_orchestrator(
     starting_equity: float = DEFAULT_PAPER_BALANCE,
     current_equity: Optional[float] = None,
+    fetch_external: bool = False,
 ):
     global _orchestrator_ref
-    if _orchestrator_ref is None:
+    task_running = _orchestrator_task is not None and not _orchestrator_task.done()
+    needs_new = (
+        _orchestrator_ref is None
+        or (not task_running and bool(getattr(_orchestrator_ref, "fetch_external", False)) != fetch_external)
+    )
+    if needs_new:
         try:
             from orchestrator import TradingOrchestrator
             _orchestrator_ref = TradingOrchestrator(
+                fetch_external=fetch_external,
                 initial_equity=starting_equity,
                 paper_mode=True,
             )
-            if current_equity is not None:
-                _orchestrator_ref.execution.equity = current_equity
             _orchestrator_ref.execution.on_position_closed = _record_trade_pnl
         except Exception:
             pass
+    if _orchestrator_ref and current_equity is not None and not task_running:
+        _orchestrator_ref.execution.equity = current_equity
     return _orchestrator_ref
 
 def _apply_orchestrator_cash_flow(amount: float):
@@ -154,6 +178,17 @@ def _reset_orchestrator_account(balance: float = DEFAULT_PAPER_BALANCE):
     execution.safety.open_positions = 0
     execution.safety.daily_pnl = 0.0
     execution.safety.weekly_pnl = 0.0
+
+async def _stop_orchestrator_task():
+    global _orchestrator_task
+    if _orchestrator_ref:
+        _orchestrator_ref.stop()
+    task = _orchestrator_task
+    if task and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    _orchestrator_task = None
 
 async def _add_wallet_transaction(transaction_type: str, amount: float, description: str) -> float:
     current_balance = await _get_paper_balance()
@@ -259,6 +294,8 @@ async def _log_system_event(level: str, source: str, message: str, metadata: Opt
 async def get_status():
     paper_balance, starting_equity, _ = await _get_wallet_account_state()
     orch = _get_orchestrator(starting_equity=starting_equity, current_equity=paper_balance)
+    task_running = _orchestrator_task is not None and not _orchestrator_task.done()
+    fetch_external = bool(getattr(orch, "fetch_external", False)) if orch else False
     current_price = None
     try:
         current_price = float(redis_client.client.get("latest_price") or 0) or None
@@ -268,7 +305,7 @@ async def get_status():
     if orch:
         status = orch.execution.get_status()
         return SystemStatus(
-            running=_system_running and not _system_paused,
+            running=_system_running and not _system_paused and task_running,
             paused=_system_paused,
             equity=status.get("equity", 10000.0),
             starting_equity=status.get("starting_equity", 10000.0),
@@ -278,10 +315,11 @@ async def get_status():
             weekly_pnl=status.get("weekly_pnl", 0.0),
             current_price=current_price or status.get("current_price"),
             last_cycle=(redis_client.get_json("latest_statistical_snapshot") or {}).get("timestamp") if redis_client.client else None,
-            mode="PAPER"
+            mode="PAPER",
+            fetch_external=fetch_external
         )
     return SystemStatus(
-        running=_system_running and not _system_paused,
+        running=_system_running and not _system_paused and task_running,
         paused=_system_paused,
         equity=paper_balance,
         starting_equity=starting_equity,
@@ -291,21 +329,57 @@ async def get_status():
         weekly_pnl=0.0,
         current_price=current_price,
         last_cycle=None,
-        mode="PAPER"
+        mode="PAPER",
+        fetch_external=fetch_external
     )
 
+@app.get("/api/health")
+async def health_check():
+    redis_ok = False
+    database_ok = False
+
+    try:
+        redis_ok = bool(redis_client.client.ping())
+    except Exception as e:
+        logger.warning(f"Health check Redis ping failed: {e}")
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(select(1))
+        database_ok = True
+    except Exception as e:
+        logger.warning(f"Health check database query failed: {e}")
+
+    return {
+        "status": "ok" if redis_ok and database_ok else "degraded",
+        "redis": redis_ok,
+        "database": database_ok,
+        "timestamp": utc_now().isoformat(),
+    }
+
+@app.get("/health")
+async def root_health_check():
+    return await health_check()
+
 @app.post("/api/system/start")
-async def start_system():
-    global _system_running, _system_paused
+async def start_system(req: Optional[SystemStartRequest] = Body(default=None)):
+    global _system_running, _system_paused, _orchestrator_task
     paper_balance, starting_equity, _ = await _get_wallet_account_state()
-    orch = _get_orchestrator(starting_equity=starting_equity, current_equity=paper_balance)
+    fetch_external = req.fetch_external if req else False
+    orch = _get_orchestrator(
+        starting_equity=starting_equity,
+        current_equity=paper_balance,
+        fetch_external=fetch_external,
+    )
     if not orch:
         raise HTTPException(status_code=500, detail="Orchestrator not available")
-    if _system_running:
+    if _orchestrator_task and not _orchestrator_task.done():
+        _system_running = True
+        _system_paused = False
         return {"message": "System already running"}
     _system_running = True
     _system_paused = False
-    asyncio.create_task(orch.run(cycle_interval_seconds=60))
+    _orchestrator_task = asyncio.create_task(orch.run(cycle_interval_seconds=60))
     await _log_system_event("INFO", "DASHBOARD", "System started")
     await manager.broadcast({"type": "system:start", "data": {"running": True}})
     return {"message": "System started"}
@@ -329,9 +403,7 @@ async def resume_system():
 @app.post("/api/system/shutdown")
 async def shutdown_system():
     global _system_running, _system_paused
-    orch = _orchestrator_ref
-    if orch:
-        orch.stop()
+    await _stop_orchestrator_task()
     _system_running = False
     _system_paused = False
     await _log_system_event("INFO", "DASHBOARD", "System shutdown")
@@ -341,9 +413,7 @@ async def shutdown_system():
 @app.post("/api/system/reset")
 async def reset_system():
     global _system_running, _system_paused
-    orch = _orchestrator_ref
-    if orch:
-        orch.stop()
+    await _stop_orchestrator_task()
     _system_running = False
     _system_paused = False
     _reset_orchestrator_account()
@@ -638,7 +708,7 @@ async def get_chart_data(
     timeframe: str = Query(TIMEFRAME)
 ):
     async with AsyncSessionLocal() as session:
-        since = datetime.utcnow() - timedelta(hours=hours)
+        since = utc_now_naive() - timedelta(hours=hours)
         result = await session.execute(
             select(Candle).where(
                 Candle.symbol == symbol,
@@ -711,7 +781,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 msg = json.loads(data)
                 if msg.get("action") == "ping":
-                    await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+                    await websocket.send_json({"type": "pong", "timestamp": utc_now().isoformat()})
             except Exception:
                 pass
     except WebSocketDisconnect:

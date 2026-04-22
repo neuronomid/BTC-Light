@@ -304,6 +304,12 @@ class TestTradingOrchestrator(unittest.IsolatedAsyncioTestCase):
         orchestrator.engine = FakeEngine()
         orchestrator.execution = FakeExecution()
         orchestrator._agents = FakeAgents()
+        recorded_agent_outputs = []
+
+        async def record_agent_outputs(cycle_timestamp, ctx, news, dec):
+            recorded_agent_outputs.append((cycle_timestamp, ctx, news, dec))
+
+        orchestrator._record_agent_outputs = record_agent_outputs
 
         with patch("orchestrator.redis_client", redis):
             await orchestrator._cycle()
@@ -312,9 +318,11 @@ class TestTradingOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orchestrator.engine.trade_args, ("LONG", 0.02, 0.04))
         self.assertEqual(redis.set_calls, [("latest_price", "100.0")])
         self.assertEqual(redis.published[0][0], "trade_decision")
-        self.assertEqual(redis.json_values[0][0], "trading_status")
+        self.assertEqual(redis.json_values[0][0], "latest_statistical_snapshot")
+        self.assertEqual(redis.json_values[1][0], "trading_status")
         self.assertTrue(orchestrator.execution.ticked)
         self.assertEqual(orchestrator.execution.evaluated[1]["action"], "LONG")
+        self.assertEqual(len(recorded_agent_outputs), 1)
 
 
 if __name__ == "__main__":

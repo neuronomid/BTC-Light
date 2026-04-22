@@ -4,7 +4,6 @@ mod position_manager;
 mod redis_bridge;
 mod safety;
 
-use crate::config::*;
 use crate::models::*;
 use crate::position_manager::PositionManager;
 use crate::redis_bridge::RedisBridge;
@@ -95,6 +94,10 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
+            info!(
+                "Received trade decision | action: {:?} | conviction: {}",
+                decision.action, decision.conviction
+            );
             let snapshot: serde_json::Value = value.get("snapshot").cloned().unwrap_or(serde_json::json!({}));
             let mut manager = pm_sub.lock().await;
             if let Some(pos) = manager.evaluate_decision(&snapshot, &decision) {

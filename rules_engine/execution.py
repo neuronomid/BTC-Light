@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Dict, Optional, List
 from dataclasses import dataclass, field
 from shared.redis_client import redis_client
+from shared.time_utils import utc_now
 from rules_engine.safety import SafetyEngine, SafetyCheck
 from config.settings import (
     MAX_RISK_PER_TRADE, MAX_DAILY_LOSS, MAX_WEEKLY_LOSS,
@@ -28,6 +29,8 @@ class Position:
     pnl: float = 0.0
     pnl_pct: float = 0.0
     status: str = "OPEN"
+    closed_at: Optional[datetime] = None
+    exit_reason: Optional[str] = None
 
 class PaperExecutionEngine:
     def __init__(self, initial_equity: float = 10000.0):
@@ -47,7 +50,7 @@ class PaperExecutionEngine:
         self.on_position_closed: Optional[Callable[[Position, str], Awaitable[None]]] = None
 
     def _generate_trade_id(self) -> str:
-        return f"T-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{len(self.positions)}"
+        return f"T-{utc_now().strftime('%Y%m%d%H%M%S')}-{len(self.positions)}"
 
     def update_price(self, price: float):
         self._current_price = price
@@ -62,7 +65,7 @@ class PaperExecutionEngine:
                 pos.pnl_pct = (pos.entry_price - price) / pos.entry_price
 
     def _check_duration(self, pos: Position) -> bool:
-        elapsed = datetime.utcnow() - pos.opened_at
+        elapsed = utc_now() - pos.opened_at
         return elapsed > timedelta(hours=MAX_POSITION_DURATION_HOURS)
 
     def _check_sl_tp(self, pos: Position, price: float) -> Optional[str]:
@@ -80,7 +83,8 @@ class PaperExecutionEngine:
 
     async def _close_position(self, pos: Position, reason: str):
         pos.status = "CLOSED"
-        pos.closed_at = datetime.utcnow()
+        pos.closed_at = utc_now()
+        pos.exit_reason = reason
         self.closed_trades.append(pos)
         self.equity += pos.pnl
         self.daily_pnl += pos.pnl
@@ -104,6 +108,9 @@ class PaperExecutionEngine:
 
     def evaluate_decision(self, snapshot: Dict, decision: Dict) -> Optional[Position]:
         if decision.get("action") == "NO_TRADE":
+            return None
+        if self.equity <= 0:
+            logger.warning("Account insolvent (equity <= 0). Rejecting new trades.")
             return None
         check = self.safety.check_all(decision, snapshot, equity=self.equity)
         if not check.passed:
@@ -130,13 +137,13 @@ class PaperExecutionEngine:
             size=size,
             stop_loss=sl,
             take_profit=tp,
-            opened_at=datetime.utcnow(),
+            opened_at=utc_now(),
             conviction=decision.get("conviction", 0),
             reasoning=decision.get("reasoning", ""),
         )
         self.positions.append(pos)
         self.safety.open_positions += 1
-        self.last_trade_time = datetime.utcnow()
+        self.last_trade_time = utc_now()
         logger.info(f"Opened {pos.trade_id} | {pos.action} | Size: {pos.size:.6f} | Entry: {pos.entry_price:.2f}")
         redis_client.publish("position:opened", {
             "trade_id": pos.trade_id,

@@ -1,9 +1,8 @@
 use crate::config::*;
-use crate::models::{AccountStatus, Action, ExitReason, Position, PositionStatus, SafetyCheck, TradeDecision};
+use crate::models::{AccountStatus, Action, ExitReason, Position, PositionStatus, TradeDecision};
 use crate::safety::SafetyEngine;
 use chrono::Utc;
 use log::{info, warn};
-use redis::{aio::Connection, AsyncCommands};
 use serde_json::Value;
 
 pub struct PositionManager {

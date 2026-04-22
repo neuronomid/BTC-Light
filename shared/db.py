@@ -3,9 +3,9 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import Column, Integer, String, Float, DateTime, BigInteger, JSON, Index
-from datetime import datetime
 from config.settings import DATABASE_URL
 from loguru import logger
+from shared.time_utils import utc_now_naive
 
 Base = declarative_base()
 
@@ -28,7 +28,7 @@ class Candle(Base):
     low = Column(Float, nullable=False)
     close = Column(Float, nullable=False)
     volume = Column(Float, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 class TradeLog(Base):
     __tablename__ = "trade_logs"
@@ -50,7 +50,7 @@ class TradeLog(Base):
     opened_at = Column(DateTime)
     closed_at = Column(DateTime)
     status = Column(String(20), default="OPEN")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 class StatisticalSnapshot(Base):
     __tablename__ = "statistical_snapshots"
@@ -65,9 +65,13 @@ class StatisticalSnapshot(Base):
     probability_data = Column(JSON)
     efficiency_data = Column(JSON)
     correlation_data = Column(JSON)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 async def init_db():
+    try:
+        from dashboard_api import db_models  # noqa: F401
+    except ImportError:
+        pass
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables created/verified.")
