@@ -132,7 +132,7 @@ class MockAgentLayer:
             conviction=conviction,
             entry_zone={"low": 0.0, "high": 0.0},
             stop_loss_pct=0.02,
-            take_profit_pct=0.04,
+            take_profit_pct=0.05,
             invalidation_conditions=[],
             size_multiplier=1.0,
             reasoning=reasoning,

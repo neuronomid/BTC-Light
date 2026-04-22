@@ -1,0 +1,26 @@
+{
+  "name": "trained_selected",
+  "min_conviction": 75,
+  "min_ev": 0.002,
+  "stop_loss_pct": 0.015,
+  "take_profit_pct": 0.06,
+  "size_multiplier": 1.0,
+  "max_risk_per_trade": 0.0075,
+  "max_daily_loss": 0.03,
+  "max_weekly_loss": 0.06,
+  "max_open_positions": 1,
+  "max_position_duration_hours": 24,
+  "min_time_between_trades_hours": 4,
+  "max_leverage": 2.5,
+  "hmm_training_window": 500,
+  "regime_state_labels": [
+    "BEAR_TREND",
+    "BULL_TREND",
+    "LOW_VOL_RANGE",
+    "HIGH_VOL_RANGE"
+  ],
+  "monte_carlo_paths": 10000,
+  "refit_interval_candles": 42,
+  "kelly_fraction_override": 0.55,
+  "seed": 42
+}

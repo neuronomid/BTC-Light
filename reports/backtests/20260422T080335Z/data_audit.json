@@ -1,0 +1,78 @@
+{
+  "requested_start": "2025-01-01T00:00:00+00:00",
+  "requested_end": "2026-04-01T00:00:00+00:00",
+  "effective_start": "2025-12-04T12:00:00+00:00",
+  "effective_end": "2026-04-01T00:00:00+00:00",
+  "timeframes": {
+    "15m": {
+      "timeframe": "15m",
+      "source_files": [
+        "history/BTCUSD/2025/BTCUSD-15m-2025-12.csv",
+        "history/BTCUSD/2026/BTCUSD-15m-2026-01.csv",
+        "history/BTCUSD/2026/BTCUSD-15m-2026-02.csv",
+        "history/BTCUSD/2026/BTCUSD-15m-2026-03.csv"
+      ],
+      "loaded_rows": 11296,
+      "fetched_rows": 0,
+      "final_rows": 11296,
+      "duplicates_removed": 0,
+      "first_timestamp": "2025-12-04T08:00:00+00:00",
+      "last_timestamp": "2026-03-31T23:45:00+00:00",
+      "missing_ranges": [
+        {
+          "start": "2025-01-01T00:00:00+00:00",
+          "end": "2025-12-04T08:00:00+00:00"
+        }
+      ],
+      "gaps": [],
+      "fetch_errors": []
+    },
+    "4h": {
+      "timeframe": "4h",
+      "source_files": [
+        "history/BTCUSD/2025/BTCUSD-4h-2025-12.csv",
+        "history/BTCUSD/2026/BTCUSD-4h-2026-01.csv",
+        "history/BTCUSD/2026/BTCUSD-4h-2026-02.csv",
+        "history/BTCUSD/2026/BTCUSD-4h-2026-03.csv"
+      ],
+      "loaded_rows": 706,
+      "fetched_rows": 0,
+      "final_rows": 706,
+      "duplicates_removed": 0,
+      "first_timestamp": "2025-12-04T08:00:00+00:00",
+      "last_timestamp": "2026-03-31T20:00:00+00:00",
+      "missing_ranges": [
+        {
+          "start": "2024-07-01T16:00:00+00:00",
+          "end": "2025-12-04T08:00:00+00:00"
+        }
+      ],
+      "gaps": [],
+      "fetch_errors": []
+    },
+    "1d": {
+      "timeframe": "1d",
+      "source_files": [
+        "history/BTCUSD/2025/BTCUSD-1d-2025-12.csv",
+        "history/BTCUSD/2026/BTCUSD-1d-2026-01.csv",
+        "history/BTCUSD/2026/BTCUSD-1d-2026-02.csv",
+        "history/BTCUSD/2026/BTCUSD-1d-2026-03.csv"
+      ],
+      "loaded_rows": 118,
+      "fetched_rows": 0,
+      "final_rows": 118,
+      "duplicates_removed": 0,
+      "first_timestamp": "2025-12-04T00:00:00+00:00",
+      "last_timestamp": "2026-03-31T00:00:00+00:00",
+      "missing_ranges": [
+        {
+          "start": "2025-01-01T00:00:00+00:00",
+          "end": "2025-12-04T00:00:00+00:00"
+        }
+      ],
+      "gaps": [],
+      "fetch_errors": []
+    }
+  },
+  "caveats": []
+}

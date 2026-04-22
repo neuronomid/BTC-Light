@@ -121,7 +121,7 @@ class PaperExecutionEngine:
             return None
         price = self._current_price
         sl_pct = decision.get("stop_loss_pct", 0.02)
-        tp_pct = decision.get("take_profit_pct", 0.04)
+        tp_pct = decision.get("take_profit_pct", 0.05)
         if decision["action"] == "LONG":
             sl = price * (1 - sl_pct)
             tp = price * (1 + tp_pct)

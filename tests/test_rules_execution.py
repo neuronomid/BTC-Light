@@ -38,7 +38,7 @@ def long_decision(**overrides):
         "action": "LONG",
         "conviction": 80,
         "stop_loss_pct": 0.02,
-        "take_profit_pct": 0.04,
+        "take_profit_pct": 0.05,
         "size_multiplier": 1.0,
         "reasoning": "test decision",
     }
@@ -129,9 +129,9 @@ class TestSafetyEngine(unittest.TestCase):
             stop_loss_price=98.0,
         )
 
-        # risk_budget = 10_000 * min(0.4 * 0.25, 0.02) = 200
-        # size_units = 200 / (100 - 98) = 100
-        self.assertEqual(size, 100.0)
+        # risk_budget = 10_000 * min(0.4 * 0.45, 0.05) = 500
+        # size_units = 500 / (100 - 98) = 250
+        self.assertEqual(size, 250.0)
 
     def test_calculate_size_enforces_leverage_cap_at_real_btc_prices(self):
         # Tiny stop distance relative to price; leverage cap binds instead.
@@ -156,11 +156,11 @@ class TestSafetyEngine(unittest.TestCase):
             stop_loss_price=98_545.60 * (1 - 0.02),
         )
 
-        # risk_budget = 5_000 * 0.02 = 100; sl_dist = 1970.912; size ~= 0.0507 BTC
+        # risk_budget = 5_000 * 0.05 = 250; sl_dist = 1970.912; size ~= 0.1268 BTC
         notional = size * 98_545.60
-        self.assertLess(size, 0.1)
+        self.assertLess(size, 0.15)
         self.assertLess(notional, 5_000 * 5 + 1e-6)
-        self.assertAlmostEqual(size * 1970.912, 100.0, places=2)
+        self.assertAlmostEqual(size * 1970.912, 250.0, places=2)
 
 
 class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
@@ -202,8 +202,8 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos.action, "LONG")
         self.assertEqual(pos.entry_price, 100.0)
         self.assertEqual(pos.stop_loss, 98.0)
-        self.assertEqual(pos.take_profit, 104.0)
-        self.assertEqual(pos.size, 100.0)
+        self.assertEqual(pos.take_profit, 105.0)
+        self.assertEqual(pos.size, 250.0)
         self.assertEqual(engine.safety.open_positions, 1)
         self.assertEqual(self.redis.published[0][0], "position:opened")
 
@@ -229,14 +229,14 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
         pos = engine.evaluate_decision(passing_snapshot(), long_decision())
         self.assertIsNotNone(pos)
 
-        engine.update_price(104.0)
+        engine.update_price(105.0)
         await engine.tick()
 
         self.assertEqual(pos.status, "CLOSED")
         self.assertEqual(len(engine.closed_trades), 1)
-        self.assertEqual(engine.equity, 10_400.0)
-        self.assertEqual(engine.daily_pnl, 400.0)
-        self.assertEqual(callback_events, [(pos.trade_id, "TAKE_PROFIT", 400.0)])
+        self.assertEqual(engine.equity, 11_250.0)
+        self.assertEqual(engine.daily_pnl, 1_250.0)
+        self.assertEqual(callback_events, [(pos.trade_id, "TAKE_PROFIT", 1_250.0)])
         self.assertEqual(self.redis.published[-1][0], "position:closed")
         self.assertEqual(self.redis.published[-1][1]["reason"], "TAKE_PROFIT")
 
@@ -251,7 +251,7 @@ class TestPaperExecutionEngine(unittest.IsolatedAsyncioTestCase):
         await engine.tick()
 
         self.assertEqual(pos.status, "CLOSED")
-        self.assertEqual(engine.closed_trades[0].pnl, -200.0)
+        self.assertEqual(engine.closed_trades[0].pnl, -500.0)
         self.assertEqual(self.redis.published[-1][1]["reason"], "STOP_LOSS")
 
     async def test_tick_closes_positions_that_exceed_max_duration(self):
